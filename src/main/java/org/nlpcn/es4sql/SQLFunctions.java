@@ -1,11 +1,13 @@
 package org.nlpcn.es4sql;
 
+import com.alibaba.druid.sql.SQLUtils;
 import com.alibaba.druid.sql.ast.SQLExpr;
 import com.alibaba.druid.sql.ast.expr.*;
 import com.google.common.base.Joiner;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Sets;
 import org.elasticsearch.common.collect.Tuple;
+import org.elasticsearch.plugin.nlpcn.executors.CSVResult;
 import org.nlpcn.es4sql.domain.KVValue;
 
 import java.util.List;
@@ -19,17 +21,38 @@ public class SQLFunctions {
 
     //Groovy Built In Functions
     public final static Set<String> buildInFunctions = Sets.newHashSet(
-            "exp", "log", "log10", "sqrt", "cbrt", "ceil", "floor", "rint", "pow", "round",
+            "exp", "log", "log2", "log10", "log10", "sqrt", "cbrt", "ceil", "floor", "rint", "pow", "round",
             "random", "abs", //nummber operator
             "split", "concat_ws", "substring", "trim",//string operator
             "add", "multiply", "divide", "subtract", "modulus",//binary operator
-            "field", "date_format"
+            "field", "date_format", "if"
     );
 
 
     public static Tuple<String, String> function(String methodName, List<KVValue> paramers, String name,boolean returnValue) {
         Tuple<String, String> functionStr = null;
-        switch (methodName) {
+        switch (methodName.toLowerCase()) {
+            case "if":
+                String nameIF = "";
+                String caseString = "";
+                if(paramers.get(0).value instanceof SQLInListExpr){
+                    nameIF += methodName+"("+((SQLInListExpr) paramers.get(0).value).getExpr()+" in (";
+                    String left = "doc['"+((SQLInListExpr) paramers.get(0).value).getExpr().toString()+"'].value";
+                    List<SQLExpr> targetList = ((SQLInListExpr) paramers.get(0).value).getTargetList();
+                    for(SQLExpr a:targetList){
+                        caseString += left + " == '" + a.toString() + "' ||";
+                        nameIF += a.toString()+",";
+                    }
+                    caseString = caseString.substring(0,caseString.length()-2);
+                    nameIF = nameIF.substring(0,nameIF.length()-1)+"),";
+                }else{
+                    String left = "doc['"+paramers.get(0).key+"'].value";
+                    caseString += left + " == '" + paramers.get(0).value+"'";
+                    nameIF = methodName+"("+paramers.get(0).toString()+",";
+                }
+                nameIF += paramers.get(1).value+","+paramers.get(2).value+")";
+                functionStr = new Tuple<>(nameIF,"if(("+caseString+")){"+paramers.get(1).value+"} else {"+paramers.get(2).value+"}");
+                break;
             case "split":
                 if (paramers.size() == 3) {
                     functionStr = split(Util.expr2Object((SQLExpr) paramers.get(0).value).toString(),
@@ -61,19 +84,26 @@ public class SQLFunctions {
                         name);
                 break;
 
-            case "floor":
+            case "abs":
             case "round":
-            case "log":
-            case "log10":
+            case "floor":
+                if (paramers.size() == 2) {
+                    //zhongshu-comment es的round()默认是保留到个位，这里给round()函数加上精确到小数点后第几位的功能
+                    int decimalPrecision = Integer.parseInt(paramers.get(1).value.toString());
+                    functionStr = mathRoundTemplate("Math."+methodName,methodName,Util.expr2Object((SQLExpr) paramers.get(0).value).toString(), name, decimalPrecision);
+                    break;
+                }
             case "ceil":
             case "cbrt":
             case "rint":
-            case "pow":
             case "exp":
             case "sqrt":
                 functionStr = mathSingleValueTemplate("Math."+methodName,methodName,Util.expr2Object((SQLExpr) paramers.get(0).value).toString(), name);
                 break;
 
+            case "pow":
+                functionStr = mathDoubleValueTemplate("Math."+methodName, methodName, Util.expr2Object((SQLExpr) paramers.get(0).value).toString(), Util.expr2Object((SQLExpr) paramers.get(1).value).toString(), name);
+                break;
 
             case "substring":
                 functionStr = substring(Util.expr2Object((SQLExpr) paramers.get(0).value).toString(),
@@ -107,10 +137,28 @@ public class SQLFunctions {
                 functionStr = field(Util.expr2Object((SQLExpr) paramers.get(0).value).toString());
                 break;
 
+            case "log2":
+                functionStr = log(SQLUtils.toSQLExpr("2"), (SQLExpr) paramers.get(0).value, name);
+                break;
+            case "log10":
+                functionStr = log(SQLUtils.toSQLExpr("10"), (SQLExpr) paramers.get(0).value, name);
+                break;
+            case "log":
+                List<SQLExpr> logs = Lists.newArrayList();
+                for (int i = 0; i < paramers.size(); i++) {
+                    logs.add((SQLExpr) paramers.get(0).value);
+                }
+                if (logs.size() > 1) {
+                    functionStr = log(logs.get(0), logs.get(1), name);
+                } else {
+                    functionStr = log(SQLUtils.toSQLExpr("Math.E"), logs.get(0), name);
+                }
+                break;
+
             default:
 
         }
-        if(returnValue){
+        if(returnValue && !methodName.equalsIgnoreCase("if")){
             String generatedFieldName = functionStr.v1();
             String returnCommand = ";return " + generatedFieldName +";" ;
             String newScript = functionStr.v2() + returnCommand;
@@ -221,7 +269,7 @@ public class SQLFunctions {
         String newScript = variance[variance.length - 1];
         if (newScript.trim().startsWith("def ")) {
             //for now ,if variant is string,then change to double.
-            return newScript.substring(4).split("=")[0].trim();
+            return newScript.trim().substring(4).split("=")[0].trim();
         } else return scriptStr;
     }
 
@@ -232,7 +280,7 @@ public class SQLFunctions {
         String newScript = variance[variance.length - 1];
         if (newScript.trim().startsWith("def ")) {
             //for now ,if variant is string,then change to double.
-            String temp = newScript.substring(4).split("=")[0].trim();
+            String temp = newScript.trim().substring(4).split("=")[0].trim();
 
             return " if( " + temp + " instanceof String) " + temp + "= Double.parseDouble(" + temp.trim() + "); ";
         } else return "";
@@ -251,6 +299,20 @@ public class SQLFunctions {
 
         return mathSingleValueTemplate("log10", strColumn, valueName);
 
+    }
+    public static Tuple<String, String> log(SQLExpr base, SQLExpr strColumn, String valueName) {
+        String name = "log_" + random();
+        String result;
+        if (valueName == null) {
+            if (isProperty(strColumn)) {
+                result = "def " + name + " = Math.log(doc['" + Util.expr2Object(strColumn).toString() + "'].value)/Math.log("+Util.expr2Object(base).toString()+")";
+            } else {
+                result = "def " + name + " = Math.log(" + Util.expr2Object(strColumn).toString() + ")/Math.log("+Util.expr2Object(base).toString()+")";
+            }
+        } else {
+            result = Util.expr2Object(strColumn).toString()+";def "+name+" = Math.log("+valueName+")/Math.log("+Util.expr2Object(base).toString()+")";
+        }
+        return new Tuple(name, result);
     }
 
     public static Tuple<String, String> sqrt(String strColumn, String valueName) {
@@ -271,6 +333,15 @@ public class SQLFunctions {
 
     }
 
+    private static Tuple<String, String> mathDoubleValueTemplate(String methodName, String fieldName, String val1, String val2, String valueName) {
+        String name = fieldName + "_" + random();
+        if (valueName == null) {
+            return new Tuple(name, "def "+name+" = "+methodName+"(doc['"+val1+"'].value, "+val2+")");
+        } else {
+            return new Tuple(name, val1 + ";def "+name+" = "+methodName+"("+valueName+", "+val2+")");
+        }
+    }
+
     private static Tuple<String, String> mathSingleValueTemplate(String methodName, String strColumn, String valueName) {
         return mathSingleValueTemplate(methodName,methodName, strColumn,valueName);
     }
@@ -280,6 +351,23 @@ public class SQLFunctions {
             return new Tuple<>(name, "def " + name + " = " + methodName + "(doc['" + strColumn + "'].value)");
         } else {
             return new Tuple<>(name, strColumn + ";def " + name + " = " + methodName + "(" + valueName + ")");
+        }
+
+    }
+
+    private static Tuple<String, String> mathRoundTemplate(String methodName, String fieldName, String strColumn, String valueName, int decimalPrecision) {
+
+        StringBuilder sb = new StringBuilder("1");
+        for (int i = 0; i < decimalPrecision; i++) {
+            sb.append("0");
+        }
+        double num = Double.parseDouble(sb.toString());
+
+        String name = fieldName + "_" + random();
+        if (valueName == null) {
+            return new Tuple<>(name, "def " + name + " = " + methodName + "((doc['" + strColumn + "'].value) * " + num + ")/" + num);
+        } else {
+            return new Tuple<>(name, strColumn + ";def " + name + " = " + methodName + "((" + valueName + ") * " + num + ")/" + num);
         }
 
     }

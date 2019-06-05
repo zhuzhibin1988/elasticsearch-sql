@@ -2,6 +2,7 @@ package org.nlpcn.es4sql.domain;
 
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 
 import com.alibaba.druid.sql.ast.SQLExpr;
@@ -10,23 +11,28 @@ import com.alibaba.druid.sql.ast.expr.SQLCharExpr;
 import com.alibaba.druid.sql.ast.expr.SQLMethodInvokeExpr;
 import com.alibaba.druid.sql.ast.expr.SQLNumericLiteralExpr;
 import org.elasticsearch.common.Strings;
+import org.elasticsearch.common.xcontent.LoggingDeprecationHandler;
 import org.elasticsearch.common.xcontent.ToXContent;
 import org.elasticsearch.index.query.*;
 import org.nlpcn.es4sql.Util;
 import org.nlpcn.es4sql.exception.SqlParseException;
 
-
-
 public class Paramer {
-	public String analysis;
-	public Float boost;
+	private String analysis;
+    private Float boost;
 	public String value;
     public Integer slop;
 
-    public Map<String, Float> fieldsBoosts = new HashMap<>();
-    public String type;
-    public Float tieBreaker;
-    public Operator operator;
+    private Map<String, Float> fieldsBoosts = new HashMap<>();
+    private String type;
+    private Float tieBreaker;
+    private Operator operator;
+
+    private String defaultField;
+    private String minimumShouldMatch;
+
+    private Boolean inOrder;
+    public String clauses;
 
 	public static Paramer parseParamer(SQLMethodInvokeExpr method) throws SqlParseException {
 		Paramer instance = new Paramer();
@@ -58,7 +64,7 @@ public class Paramer {
 
                     case "fields":
                         int index;
-                        for (String f : Strings.split(Util.expr2Object(sqlExpr.getRight()).toString(), ",")) {
+                        for (String f : Strings.splitStringByCommaToArray(Util.expr2Object(sqlExpr.getRight()).toString())) {
                             index = f.lastIndexOf('^');
                             if (-1 < index) {
                                 instance.fieldsBoosts.put(f.substring(0, index), Float.parseFloat(f.substring(index + 1)));
@@ -76,6 +82,21 @@ public class Paramer {
                     case "operator":
                         instance.operator = Operator.fromString(Util.expr2Object(sqlExpr.getRight()).toString());
                         break;
+
+                    case "default_field":
+                        instance.defaultField = Util.expr2Object(sqlExpr.getRight()).toString();
+                        break;
+
+                    case "in_order":
+                        instance.inOrder = Boolean.valueOf(Util.expr2Object(sqlExpr.getRight()).toString());
+                        break;
+                    case "clauses":
+                        instance.clauses = Util.expr2Object(sqlExpr.getRight()).toString();
+                        break;
+                    case "minimum_should_match":
+                        instance.minimumShouldMatch = Util.expr2Object(sqlExpr.getRight()).toString();
+                        break;
+
                     default:
                         break;
                 }
@@ -109,6 +130,15 @@ public class Paramer {
 		if (paramer.boost != null) {
 			query.boost(paramer.boost);
 		}
+
+        if (paramer.operator != null) {
+            query.operator(paramer.operator);
+        }
+
+        if (paramer.minimumShouldMatch != null) {
+            query.minimumShouldMatch(paramer.minimumShouldMatch);
+        }
+
 		return query;
 	}
 
@@ -131,6 +161,28 @@ public class Paramer {
         if (paramer.slop != null) {
             query.phraseSlop(paramer.slop);
         }
+
+        if (paramer.defaultField != null) {
+            query.defaultField(paramer.defaultField);
+        }
+
+        if (paramer.tieBreaker != null) {
+            query.tieBreaker(paramer.tieBreaker);
+        }
+
+        if (paramer.operator != null) {
+            query.defaultOperator(paramer.operator);
+        }
+
+        if (paramer.type != null) {
+            query.type(MultiMatchQueryBuilder.Type.parse(paramer.type.toLowerCase(Locale.ROOT), LoggingDeprecationHandler.INSTANCE));
+        }
+
+        if (paramer.minimumShouldMatch != null) {
+            query.minimumShouldMatch(paramer.minimumShouldMatch);
+        }
+
+        query.fields(paramer.fieldsBoosts);
 
         return query;
     }
@@ -158,6 +210,24 @@ public class Paramer {
 
         if (paramer.operator != null) {
             query.operator(paramer.operator);
+        }
+
+        if (paramer.minimumShouldMatch != null) {
+            query.minimumShouldMatch(paramer.minimumShouldMatch);
+        }
+
+        query.fields(paramer.fieldsBoosts);
+
+        return query;
+    }
+
+    public static ToXContent fullParamer(SpanNearQueryBuilder query, Paramer paramer) {
+        if (paramer.boost != null) {
+            query.boost(paramer.boost);
+        }
+
+        if (paramer.inOrder != null) {
+            query.inOrder(paramer.inOrder);
         }
 
         return query;

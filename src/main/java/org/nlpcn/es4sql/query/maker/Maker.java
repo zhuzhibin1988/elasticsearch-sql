@@ -5,38 +5,39 @@ import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.util.*;
 
-import com.alibaba.druid.sql.ast.expr.SQLBooleanExpr;
-import com.alibaba.druid.sql.ast.expr.SQLIdentifierExpr;
-import com.alibaba.druid.sql.ast.expr.SQLMethodInvokeExpr;
-import com.alibaba.druid.sql.ast.expr.SQLNumericLiteralExpr;
+import com.alibaba.druid.sql.ast.expr.*;
+import com.fasterxml.jackson.core.JsonFactory;
 import com.google.common.collect.ImmutableSet;
 import org.apache.lucene.search.join.ScoreMode;
+import org.elasticsearch.common.ParsingException;
 import org.elasticsearch.common.geo.GeoPoint;
 import org.elasticsearch.common.geo.builders.ShapeBuilder;
+import org.elasticsearch.common.geo.parsers.ShapeParser;
+import org.elasticsearch.common.settings.Settings;
+import org.elasticsearch.common.xcontent.LoggingDeprecationHandler;
 import org.elasticsearch.common.xcontent.NamedXContentRegistry;
 import org.elasticsearch.common.xcontent.ToXContent;
 import org.elasticsearch.common.xcontent.XContentParser;
 import org.elasticsearch.common.xcontent.json.JsonXContent;
+import org.elasticsearch.common.xcontent.json.JsonXContentParser;
 import org.elasticsearch.index.query.*;
 import org.elasticsearch.join.query.JoinQueryBuilders;
 import org.elasticsearch.script.Script;
+import org.elasticsearch.search.SearchModule;
 import org.nlpcn.es4sql.domain.Condition;
 import org.nlpcn.es4sql.domain.Condition.OPEAR;
 import org.nlpcn.es4sql.domain.Paramer;
 import org.nlpcn.es4sql.domain.Where;
 import org.nlpcn.es4sql.exception.SqlParseException;
 
-
+import org.nlpcn.es4sql.parse.CaseWhenParser;
 import org.nlpcn.es4sql.parse.ScriptFilter;
 import org.nlpcn.es4sql.parse.SubQueryExpression;
 import org.nlpcn.es4sql.spatial.*;
 
 public abstract class Maker {
 
-
-	private static final Set<OPEAR> NOT_OPEAR_SET = ImmutableSet.of(OPEAR.N, OPEAR.NIN, OPEAR.ISN, OPEAR.NBETWEEN, OPEAR.NLIKE,OPEAR.NIN_TERMS,OPEAR.NTERM);
-
-
+	private static final Set<OPEAR> NOT_OPEAR_SET = ImmutableSet.of(OPEAR.N, OPEAR.NIN, OPEAR.ISN, OPEAR.NBETWEEN, OPEAR.NLIKE,OPEAR.NIN_TERMS,OPEAR.NTERM,OPEAR.NREGEXP);
 
 	protected Maker(Boolean isQuery) {
 
@@ -112,9 +113,38 @@ public abstract class Maker {
         case "multi_match":
         case "multimatch":
             paramer = Paramer.parseParamer(value);
-            MultiMatchQueryBuilder multiMatchQuery = QueryBuilders.multiMatchQuery(paramer.value).fields(paramer.fieldsBoosts);
+            MultiMatchQueryBuilder multiMatchQuery = QueryBuilders.multiMatchQuery(paramer.value);
             bqb = Paramer.fullParamer(multiMatchQuery, paramer);
             break;
+
+        case "spannearquery":
+        case "span_near":
+        case "spannear":
+            paramer = Paramer.parseParamer(value);
+
+            // parse clauses
+            List<SpanQueryBuilder> clauses = new ArrayList<>();
+            try (JsonXContentParser parser = new JsonXContentParser(new NamedXContentRegistry(new SearchModule(Settings.EMPTY, true, Collections.emptyList()).getNamedXContents()), LoggingDeprecationHandler.INSTANCE, new JsonFactory().createParser(paramer.clauses))) {
+                while (parser.nextToken() != XContentParser.Token.END_ARRAY) {
+                    QueryBuilder query = SpanNearQueryBuilder.parseInnerQueryBuilder(parser);
+                    if (!(query instanceof SpanQueryBuilder)) {
+                        throw new ParsingException(parser.getTokenLocation(), "spanNear [clauses] must be of type span query");
+                    }
+                    clauses.add((SpanQueryBuilder) query);
+                }
+            } catch (IOException e) {
+                throw new SqlParseException("could not parse clauses: " + e.getMessage());
+            }
+
+            //
+            SpanNearQueryBuilder spanNearQuery = QueryBuilders.spanNearQuery(clauses.get(0), Optional.ofNullable(paramer.slop).orElse(SpanNearQueryBuilder.DEFAULT_SLOP));
+            for (int i = 1; i < clauses.size(); ++i) {
+                spanNearQuery.addClause(clauses.get(i));
+            }
+
+            bqb = Paramer.fullParamer(spanNearQuery, paramer);
+            break;
+
 		default:
 			throw new SqlParseException("it did not support this query method " + value.getMethodName());
 
@@ -155,6 +185,7 @@ public abstract class Maker {
 			x = QueryBuilders.wildcardQuery(name, queryStr);
 			break;
         case REGEXP:
+        case NREGEXP:
             Object[] values = (Object[]) value;
             RegexpQueryBuilder regexpQuery = QueryBuilders.regexpQuery(name, values[0].toString());
             if (1 < values.length) {
@@ -184,18 +215,43 @@ public abstract class Maker {
 			break;
 		case NIN:
 		case IN:
-            //todo: value is subquery? here or before
-            values = (Object[]) value;
-			MatchPhraseQueryBuilder[] matchQueries = new MatchPhraseQueryBuilder[values.length];
-			for(int i = 0; i < values.length; i++) {
-				matchQueries[i] = QueryBuilders.matchPhraseQuery(name, values[i]);
-			}
 
-            BoolQueryBuilder boolQuery = QueryBuilders.boolQuery();
-            for(MatchPhraseQueryBuilder matchQuery : matchQueries) {
-                boolQuery.should(matchQuery);
+		    if (cond.getNameExpr() instanceof SQLCaseExpr) {
+                /*
+                zhongshu-comment 调用CaseWhenParser解析将Condition的nameExpr属性对象解析为script query
+                参考了SqlParser.findSelect()方法，看它是如何解析select中的case when字段的
+                 */
+                String scriptCode = new CaseWhenParser((SQLCaseExpr) cond.getNameExpr(), null, null).parseCaseWhenInWhere((Object[]) value);
+                /*
+                zhongshu-comment
+                参考DefaultQueryAction.handleScriptField() 将上文得到的scriptCode封装为es的Script对象，
+                但又不是完全相同，因为DefaultQueryAction.handleScriptField()是处理select子句中的case when查询，对应es的script_field查询，
+                而此处是处理where子句中的case when查询，对应的是es的script query，具体要看官网文档，搜索关键字是"script query"
+
+                搜索结果如下：
+                1、文档
+                    https://www.elastic.co/guide/en/elasticsearch/reference/6.1/query-dsl-script-query.html
+                2、java api
+                    https://www.elastic.co/guide/en/elasticsearch/client/java-api/6.1/java-specialized-queries.html
+                 */
+
+                x = QueryBuilders.scriptQuery(new Script(scriptCode));
+
+            } else {
+                //todo: value is subquery? here or before
+                values = (Object[]) value;
+                MatchPhraseQueryBuilder[] matchQueries = new MatchPhraseQueryBuilder[values.length];
+                for(int i = 0; i < values.length; i++) {
+                    matchQueries[i] = QueryBuilders.matchPhraseQuery(name, values[i]);
+                }
+
+                BoolQueryBuilder boolQuery = QueryBuilders.boolQuery();
+                for(MatchPhraseQueryBuilder matchQuery : matchQueries) {
+                    boolQuery.should(matchQuery);
+                }
+                x = boolQuery;
             }
-            x = boolQuery;
+
 			break;
 		case BETWEEN:
 		case NBETWEEN:
@@ -326,9 +382,9 @@ public abstract class Maker {
 
     private ShapeBuilder getShapeBuilderFromJson(String json) throws IOException {
         XContentParser parser = null;
-        parser = JsonXContent.jsonXContent.createParser(NamedXContentRegistry.EMPTY, json);
+        parser = JsonXContent.jsonXContent.createParser(NamedXContentRegistry.EMPTY, LoggingDeprecationHandler.INSTANCE, json);
         parser.nextToken();
-        return ShapeBuilder.parse(parser);
+        return ShapeParser.parse(parser);
     }
 
     private String trimApostrophes(String str) {

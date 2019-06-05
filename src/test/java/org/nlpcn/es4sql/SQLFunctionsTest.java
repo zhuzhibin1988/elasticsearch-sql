@@ -181,7 +181,7 @@ public class SQLFunctionsTest {
         ScriptFilter scriptFilter = (ScriptFilter) (((Condition) (where.getWheres().get(0))).getValue());
 
         Assert.assertTrue(scriptFilter.getScript().contains("doc['address'].value.split(' ')[0]"));
-        Pattern pattern = Pattern.compile("floor_\\d+ > doc\\['b'\\].value");
+        Pattern pattern = Pattern.compile("\\(\\(Comparable\\)floor_\\d+\\).compareTo\\(doc\\['b'\\].value\\) > 0");
         Matcher matcher = pattern.matcher(scriptFilter.getScript());
         Assert.assertTrue(matcher.find());
 
@@ -205,7 +205,7 @@ public class SQLFunctionsTest {
         Assert.assertTrue(((Condition) (where.getWheres().get(0))).getValue() instanceof ScriptFilter);
         ScriptFilter scriptFilter = (ScriptFilter) (((Condition) (where.getWheres().get(0))).getValue());
         Assert.assertTrue(scriptFilter.getScript().contains("doc['address'].value.split(' ')[0]"));
-        Pattern pattern = Pattern.compile("floor_\\d+ == floor_\\d+");
+        Pattern pattern = Pattern.compile("\\(\\(Comparable\\)floor_\\d+\\).compareTo\\(floor_\\d+\\) == 0");
         Matcher matcher = pattern.matcher(scriptFilter.getScript());
         Assert.assertTrue(matcher.find());
     }
@@ -243,6 +243,36 @@ public class SQLFunctionsTest {
         List<String> contents = csvResult.getLines();
         Assert.assertTrue(headers.size() == 2);
         Assert.assertTrue(contents.get(0).contains("-"));
+    }
+
+    @Test
+    public void functionLogs() throws Exception {
+        String query = "SELECT log10(100) as a, log(1) as b, log(2, 4) as c, log2(8) as d from "
+                + TEST_INDEX_ACCOUNT + "/account limit 1";
+        CSVResult csvResult = getCsvResult(false, query);
+        List<String> content = csvResult.getLines();
+        Assert.assertTrue(content.toString().contains("2.0"));
+        Assert.assertTrue(content.toString().contains("1.0"));
+        Assert.assertTrue(content.toString().contains("0.0"));
+        Assert.assertTrue(content.toString().contains("3.0"));
+    }
+
+    @Test
+    public void functionPow() throws Exception {
+        String query = "SELECT pow(account_number, 2) as key,"+
+                "abs(age - 60) as new_age from " + TEST_INDEX_ACCOUNT + "/account limit 1";
+        CSVResult csvResult = getCsvResult(false, query);
+        List<String> content = csvResult.getLines();
+        Assert.assertTrue(content.toString().contains("625"));
+        Assert.assertTrue(content.toString().contains("21"));
+    }
+
+    @Test
+    public void testSumTwoFields() throws Exception {
+        String query = "SELECT SUM(account_number+age) AS sum from " + TEST_INDEX_PEOPLE + "/people";
+        CSVResult csvResult = getCsvResult(false, query);
+        List<String> content = csvResult.getLines();
+        Assert.assertTrue(content.toString().contains("752"));
     }
 
     // todo: change when split is back on language
